@@ -1,28 +1,29 @@
 #pragma once
 
-#include <QTcpSocket>
 #include <QSocketNotifier>
+#include <QTcpSocket>
 
 class ChatClient : public QObject {
-    Q_OBJECT
+  Q_OBJECT
 
 public:
-    explicit ChatClient(QObject *parent = nullptr);
+  explicit ChatClient(QObject *parent = nullptr);
 
-    void connectToServer(const QString &ip, quint16 port, const QString &nick = "", const QString &k = "");
+  void connectToServer(const QString &ip, quint16 port,
+                       const QString &nick = "", const QString &k = "");
 
 private slots:
-    void onConnected();
+  void onConnected();
 
-    void onReadyRead();
+  void onReadyRead();
 
-    void onUserInput();
+  void onUserInput();
 
 private:
-    QTcpSocket *m_socket;
-    QSocketNotifier *m_stdinNotifier;
-    QTextStream m_input;
+  QTcpSocket *m_socket;
+  QSocketNotifier *m_stdinNotifier;
+  QTextStream m_input;
 
-    QString key;
-    QString nickname;
+  QString key;
+  QString nickname;
 };
