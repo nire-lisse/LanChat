@@ -21,26 +21,26 @@ int main(int argc, char *argv[]) {
                                       "Server port to connect.", "port",
                                       "3333");
 
-  const QCommandLineOption nickOption(QStringList() << "n" << "nickname",
-                                      "Your nickname.", "nickname", "");
+  const QCommandLineOption loginOption(QStringList() << "l" << "login",
+                                      "Your login.", "login", "");
 
-  const QCommandLineOption keyOption(QStringList() << "k" << "key",
-                                     "Crypto key.", "key", "");
+  const QCommandLineOption passwordOption(QStringList() << "P" << "password",
+                                     "Your password.", "password", "");
 
   parser.addOption(ipOption);
   parser.addOption(portOption);
-  parser.addOption(nickOption);
-  parser.addOption(keyOption);
+  parser.addOption(loginOption);
+  parser.addOption(passwordOption);
 
   parser.process(a);
 
   const QString ip = parser.value(ipOption);
   const QString port = parser.value(portOption);
-  const QString nick = parser.value(nickOption);
-  const QString key = parser.value(keyOption);
+  const QString login = parser.value(loginOption);
+  const QString password = parser.value(passwordOption);
 
   ChatClient client;
-  client.connectToServer(ip, port.toUInt(), nick, key);
+  client.connectToServer(ip, port.toUInt(), login, password);
 
   return a.exec();
 }

@@ -7,4 +7,6 @@ add_executable(LanChatServer
 target_link_libraries(LanChatServer
         Qt::Core
         Qt::Network
+        Qt::Sql
+        LanChatCommon
 )

@@ -12,8 +12,10 @@ set(CMAKE_AUTOUIC ON)
 find_package(Qt6 COMPONENTS
         Core
         Network
+        Sql
         REQUIRED)
 
 add_subdirectory(Common)
 add_subdirectory(Client)
 add_subdirectory(Server)
+

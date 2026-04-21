@@ -15,3 +15,7 @@ QByteArray CryptoHelper::process(const QByteArray &data, const QString &key) {
 
   return result;
 }
+
+QByteArray CryptoHelper::autoProcess(const QByteArray &data) {
+  return process(data, "SuperGigaSecret");
+}

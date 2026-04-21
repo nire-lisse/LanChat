@@ -10,7 +10,7 @@ public:
   explicit ChatClient(QObject *parent = nullptr);
 
   void connectToServer(const QString &ip, quint16 port,
-                       const QString &nick = "", const QString &k = "");
+                       const QString &login = "", const QString &password = "");
 
 private slots:
   void onConnected();
@@ -26,4 +26,6 @@ private:
 
   QString key;
   QString nickname;
+  QString m_login;
+  QString m_password;
 };
