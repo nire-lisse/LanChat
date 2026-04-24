@@ -3,41 +3,18 @@
 #include <iostream>
 #include <print>
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QJsonObject>
-#include <QSqlError>
-#include <QSqlQuery>
 #include <QSettings>
-#include <QCoreApplication>
 
 #include "CryptoHelper.h"
+#include "DatabaseManager.h"
 
-ChatServer::ChatServer(const quint16 port, QObject *parent) : QObject(parent) {
-  QString configPath = QCoreApplication::applicationDirPath() + "/config.ini";
-  QSettings settings(configPath, QSettings::IniFormat);
-
-  QString dbHost = settings.value("Database/Host", "127.0.0.1").toString();
-  QString dbName = settings.value("Database/Name", "lanchat").toString();
-  QString dbUser = settings.value("Database/User", "chatserver").toString();
-  QString dbPass = settings.value("Database/Password", "").toString();
-
-  if (dbPass.isEmpty()) {
-    std::cerr << "[Fatal Error] Database password is not set in config.ini!" << std::endl;
-    exit(1);
-  }
-
-  QSqlDatabase db = QSqlDatabase::addDatabase("QPSQL");
-  db.setHostName(dbHost);
-  db.setDatabaseName(dbName);
-  db.setUserName(dbUser);
-  db.setPassword(dbPass);
-
-  if (!db.open()) {
-    std::cerr << "[DB Error] Failed to connect: "
-              << db.lastError().text().toStdString() << std::endl;
-  } else {
-    std::println("Database connected successfully.");
-  }
+ChatServer::ChatServer(const quint16 port, DatabaseManager *dbManager,
+                       QObject *parent)
+    : QObject(parent) {
+  m_dbManager = dbManager;
 
   m_server = new QTcpServer(this);
   connect(m_server, &QTcpServer::newConnection, this,
@@ -89,11 +66,20 @@ void ChatServer::onClientReadyRead() {
     return;
 
   const QJsonObject json = doc.object();
+  const QString type = json["type"].toString();
 
-  if (!senderSocket->property("isAuthorized").toBool()) {
+  bool isAuthorized = senderSocket->property("isAuthorized").toBool();
+
+  if (type == "auth" && !isAuthorized)
     handleAuthRequest(senderSocket, json);
-  } else {
+  else if (type == "change_password")
+    handleChangePasswordRequest(senderSocket, json);
+  else if (type == "message" && isAuthorized)
     handleChatMessage(senderSocket, json);
+  else {
+    std::println("Invalid packet sequence or unknown type.");
+
+    senderSocket->disconnectFromHost();
   }
 }
 
@@ -124,30 +110,44 @@ void ChatServer::handleAuthRequest(QTcpSocket *senderSocket,
       QCryptographicHash::hash(password.toUtf8(), QCryptographicHash::Sha256)
           .toHex());
 
-  QSqlQuery query;
-  query.prepare("SELECT nickname FROM users WHERE login = :login AND "
-                "password_hash = :hash");
-  query.bindValue(":login", login);
-  query.bindValue(":hash", hash);
+  auto authResult = m_dbManager->checkAuth(login, hash);
 
-  if (query.exec() && query.next()) {
-    const QString nickname = query.value(0).toString();
-    senderSocket->setProperty("isAuthorized", true);
-    senderSocket->setProperty("nickname", nickname);
-
-    std::println("User '{}' authorized successfully as '{}'",
-                 login.toStdString(), nickname.toStdString());
-
-    QJsonObject successMsg;
-    successMsg["nick"] = "System";
-    successMsg["text"] = "Auth successful. Welcome, " + nickname + "!";
-    const QByteArray outData = CryptoHelper::autoProcess(
-        QJsonDocument(successMsg).toJson(QJsonDocument::Compact));
-
-    senderSocket->write(outData);
-  } else {
+  if (!authResult.isValid) {
     std::println("Auth failed for login: {}", login.toStdString());
     senderSocket->disconnectFromHost();
+
+    return;
+  }
+
+  senderSocket->setProperty("login", login);
+  senderSocket->setProperty("nickname", authResult.nickname);
+
+  if (authResult.requiresPasswordChange) {
+    std::println("User '{}' needs to change password.", login.toStdString());
+
+    QJsonObject response;
+    response["type"] = "auth_response";
+    response["status"] = "force_change";
+    response["text"] = "You must change your password to continue.";
+
+    const QByteArray outData = CryptoHelper::autoProcess(
+        QJsonDocument(response).toJson(QJsonDocument::Compact));
+    senderSocket->write(outData);
+  } else {
+    senderSocket->setProperty("isAuthorized", true);
+    std::println("User '{}' authorized successfully as '{}'",
+                 login.toStdString(), authResult.nickname.toStdString());
+
+    QJsonObject successMsg;
+    successMsg["type"] = "auth_response";
+    successMsg["status"] = "success";
+    successMsg["nick"] = "System";
+    successMsg["text"] =
+        "Auth successful. Welcome, " + authResult.nickname + "!";
+
+    const QByteArray outData = CryptoHelper::autoProcess(
+        QJsonDocument(successMsg).toJson(QJsonDocument::Compact));
+    senderSocket->write(outData);
   }
 }
 
@@ -170,5 +170,68 @@ void ChatServer::handleChatMessage(const QTcpSocket *senderSocket,
     if (socket != senderSocket && socket->property("isAuthorized").toBool()) {
       socket->write(outData);
     }
+  }
+}
+
+void ChatServer::handleChangePasswordRequest(QTcpSocket *senderSocket,
+                                             const QJsonObject &json) {
+  const QString login = senderSocket->property("login").toString();
+
+  if (login.isEmpty()) {
+    std::println("Password change attempt without login.");
+    senderSocket->disconnectFromHost();
+    return;
+  }
+
+  const bool isAuthorized = senderSocket->property("isAuthorized").toBool();
+
+  const QString newPassword = json["new_password"].toString();
+  if (newPassword.isEmpty())
+    return;
+
+  if (isAuthorized) {
+    const QString oldPassword = json["old_password"].toString();
+    const auto hash =
+        QString(QCryptographicHash::hash(oldPassword.toUtf8(),
+                                         QCryptographicHash::Sha256)
+                    .toHex());
+
+    if (!m_dbManager->checkAuth(login, hash).isValid) {
+      const QJsonObject response{{"type", "error"},
+                                 {"text", "Wrong old password"}};
+      senderSocket->write(CryptoHelper::autoProcess(
+          QJsonDocument(response).toJson(QJsonDocument::Compact)));
+      return;
+    }
+  }
+
+  if (m_dbManager->setPassword(login, newPassword, true)) {
+    std::println("User '{}' successfully updated their password.",
+                 login.toStdString());
+
+    QJsonObject response;
+
+    if (!isAuthorized) {
+      senderSocket->setProperty("isAuthorized", true);
+
+      const QString nickname = senderSocket->property("nickname").toString();
+
+      response["type"] = "auth_response";
+      response["status"] = "success";
+      response["nick"] = "System";
+      response["text"] =
+          "Password changed successfully. Welcome, " + nickname + "!";
+    } else {
+      response["type"] = "system_message";
+      response["text"] = "Your password has been successfully updated.";
+    }
+
+    const QByteArray outData = CryptoHelper::autoProcess(
+        QJsonDocument(response).toJson(QJsonDocument::Compact));
+    senderSocket->write(outData);
+  } else {
+    std::println("Database error while changing password for '{}'.",
+                 login.toStdString());
+    senderSocket->disconnectFromHost();
   }
 }

@@ -2,6 +2,7 @@
 
 #include <print>
 
+#include "Commands/ClientCommandRegistry.h"
 #include "CryptoHelper.h"
 
 #include <QCoreApplication>
@@ -10,10 +11,12 @@
 ChatClient::ChatClient(QObject *parent) : QObject(parent), m_input(stdin) {
   m_socket = new QTcpSocket(this);
 
+  m_registry = std::make_unique<ClientCommandRegistry>(this);
+
   connect(m_socket, &QTcpSocket::connected, this, &ChatClient::onConnected);
   connect(m_socket, &QTcpSocket::readyRead, this, &ChatClient::onReadyRead);
   connect(m_socket, &QTcpSocket::disconnected, this, []() {
-    std::println("Disconnected from server. (Wrong password or server down)");
+    std::println("[System] Disconnected from server.");
     QCoreApplication::quit();
   });
 
@@ -22,47 +25,37 @@ ChatClient::ChatClient(QObject *parent) : QObject(parent), m_input(stdin) {
           &ChatClient::onUserInput);
 }
 
+ChatClient::~ChatClient() = default;
+
 void ChatClient::connectToServer(const QString &ip, quint16 port,
                                  const QString &login,
                                  const QString &password) {
   std::println("Connecting to {}:{}.", ip.toStdString(), port);
 
-  if (login.isEmpty()) {
-    std::print("Enter login: ");
-    m_login = m_input.readLine();
-  } else {
-    m_login = login;
-  }
-
-  if (password.isEmpty()) {
-    std::print("Enter password: ");
-    m_password = m_input.readLine();
-  } else {
-    m_password = password;
-  }
+  m_login = login;
+  m_password = password;
 
   m_socket->connectToHost(ip, port);
 }
 
 void ChatClient::onConnected() {
-  std::println("Connected to server! Sending auth request...");
+  std::println("Connected to server!");
 
-  QJsonObject authMsg;
-  authMsg["type"] = "auth";
-  authMsg["login"] = m_login;
-  authMsg["password"] = m_password;
+  if (!m_login.isEmpty() && !m_password.isEmpty()) {
+    std::println("Attempting auto-login for user '{}'...",
+                 m_login.toStdString());
+    sendAuth(m_login, m_password);
 
-  const QByteArray authData =
-      QJsonDocument(authMsg).toJson(QJsonDocument::Compact);
-  m_socket->write(CryptoHelper::autoProcess(authData));
-  m_socket->flush();
-
-  std::println("Auth sent.");
+    m_login.clear();
+    m_password.clear();
+  } else {
+    std::println("Type '/help' to see available commands or '/login <login> "
+                 "<pass>' to authenticate.");
+  }
 }
 
 void ChatClient::onReadyRead() {
   const auto data = m_socket->readAll();
-
   const auto decryptData = CryptoHelper::autoProcess(data);
 
   QJsonParseError error;
@@ -73,28 +66,95 @@ void ChatClient::onReadyRead() {
     return;
   }
 
-  QJsonObject message = doc.object();
+  const QJsonObject json = doc.object();
+  const QString type = json["type"].toString();
 
-  const auto nick = message["nick"].toString();
-  const auto text = message["text"].toString();
-
-  std::println("[{}]: {}", nick.toStdString(), text.toStdString());
+  if (type == "auth_response") {
+    handleAuthResponse(json);
+  } else if (type == "message") {
+    handleIncomingMessage(json);
+  } else if (type == "system_message") {
+    handleSystemMessage(json);
+  } else if (type == "error") {
+    std::println("[Server Error] {}", json["text"].toString().toStdString());
+  } else {
+    std::println("[Warning] Unknown packet type: {}", type.toStdString());
+  }
 }
 
 void ChatClient::onUserInput() {
-  const QString line = m_input.readLine();
+  const QString line = m_input.readLine().trimmed();
 
-  if (line.isEmpty()) {
+  if (line.isEmpty())
     return;
+
+  if (line.startsWith("/")) {
+    m_registry->processInput(line.mid(1));
+  } else {
+    if (m_isAuthorized) {
+      sendChatMessage(line);
+    } else {
+      std::println("[Error] You must be logged in to send messages. Use "
+                   "'/login <login> <pass>'.");
+    }
+  }
+}
+
+void ChatClient::sendAuth(const QString &login, const QString &password) const {
+  const QJsonObject authMsg{
+      {"type", "auth"}, {"login", login}, {"password", password}};
+
+  const QByteArray authData = CryptoHelper::autoProcess(
+      QJsonDocument(authMsg).toJson(QJsonDocument::Compact));
+
+  m_socket->write(authData);
+  m_socket->flush();
+}
+
+void ChatClient::sendChangePassword(const QString &newPassword,
+                                    const QString &oldPassword) const {
+  QJsonObject msg{{"type", "change_password"}, {"new_password", newPassword}};
+
+  if (!oldPassword.isEmpty()) {
+    msg["old_password"] = oldPassword;
   }
 
-  QJsonObject message;
-  message["type"] = "message";
-  message["text"] = line;
+  const QByteArray outData = CryptoHelper::autoProcess(
+      QJsonDocument(msg).toJson(QJsonDocument::Compact));
 
-  const QByteArray encryptedBytes =
-      CryptoHelper::autoProcess(QJsonDocument(message).toJson());
+  m_socket->write(outData);
+  m_socket->flush();
+}
+
+void ChatClient::sendChatMessage(const QString &text) const {
+  const QJsonObject message{{"type", "message"}, {"text", text}};
+
+  const QByteArray encryptedBytes = CryptoHelper::autoProcess(
+      QJsonDocument(message).toJson(QJsonDocument::Compact));
 
   m_socket->write(encryptedBytes);
   m_socket->flush();
+}
+
+void ChatClient::handleAuthResponse(const QJsonObject &json) {
+  const QString status = json["status"].toString();
+  const QString text = json["text"].toString();
+
+  if (status == "success") {
+    m_isAuthorized = true;
+    std::println("[System] {}", text.toStdString());
+  } else if (status == "force_change") {
+    std::println("[System] {}", text.toStdString());
+    std::println(
+        "[System] Please use '/changepass <new_password>' to continue.");
+  }
+}
+
+void ChatClient::handleIncomingMessage(const QJsonObject &json) {
+  std::println("[{}]: {}", json["nick"].toString().toStdString(),
+               json["text"].toString().toStdString());
+}
+
+void ChatClient::handleSystemMessage(const QJsonObject &json) {
+  std::println("[System] {}", json["text"].toString().toStdString());
 }

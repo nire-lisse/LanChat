@@ -2,6 +2,18 @@ add_executable(LanChatServer
         main.cpp
         ChatServer.cpp
         ChatServer.h
+        DatabaseManager.cpp
+        DatabaseManager.h
+        AdminConsole.cpp
+        AdminConsole.h
+        Commands/HelpCommand.h
+        Commands/UserCommand.h
+        Commands/User/UserAddCommand.h
+        Commands/ServerCommandRegistry.h
+        Commands/User/UserDelCommand.h
+        Commands/User/UserListCommand.h
+        Commands/User/UserSetCommand.h
+        Commands/User/Set/UserSetPassCommand.h
 )
 
 target_link_libraries(LanChatServer

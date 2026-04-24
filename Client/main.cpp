@@ -22,10 +22,10 @@ int main(int argc, char *argv[]) {
                                       "3333");
 
   const QCommandLineOption loginOption(QStringList() << "l" << "login",
-                                      "Your login.", "login", "");
+                                       "Your login.", "login", "");
 
   const QCommandLineOption passwordOption(QStringList() << "P" << "password",
-                                     "Your password.", "password", "");
+                                          "Your password.", "password", "");
 
   parser.addOption(ipOption);
   parser.addOption(portOption);
