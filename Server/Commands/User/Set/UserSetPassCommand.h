@@ -1,7 +1,6 @@
 #pragma once
 #include "../../../DatabaseManager.h"
 #include "Command.h"
-#include <print>
 
 class UserSetPassCommand : public Command {
   DatabaseManager *m_db;
@@ -15,11 +14,10 @@ public:
   void execute(const QStringList &args) override {
     const QString login = args[0];
 
-    if (QString newPass = args[1]; m_db->setPassword(login, newPass, false))
-      std::println("[Success] Password for '{}' has been reset.",
-                   login.toStdString());
+    if (const QString newPass = args[1];
+        m_db->setPassword(login, newPass, false))
+      spdlog::info("Password for '{}' has been reset.", login.toStdString());
     else
-      std::println("[Error] Could not reset password for '{}'.",
-                   login.toStdString());
+      spdlog::warn("Could not reset password for '{}'.", login.toStdString());
   }
 };

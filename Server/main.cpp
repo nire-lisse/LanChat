@@ -5,14 +5,33 @@
 
 #include "ChatServer.h"
 #include "DatabaseManager.h"
+#include "spdlog/sinks/daily_file_sink.h"
+#include "spdlog/sinks/stdout_color_sinks-inl.h"
+#include "spdlog/spdlog.h"
 
 #include <QSettings>
-#include <iostream>
+
+void setupServerLogger() {
+  auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+  console_sink->set_pattern("[%d/%m/%Y %H:%M:%S %z] [%^%l%$] %v");
+
+  auto file_sink = std::make_shared<spdlog::sinks::daily_file_sink_mt>(
+      "logs/daily.txt", 0, 0);
+  file_sink->set_pattern("[%H:%M:%S %z] [%^%l%$] %v");
+
+  auto logger = std::make_shared<spdlog::logger>(
+      "server_logger", spdlog::sinks_init_list{console_sink, file_sink});
+
+  spdlog::set_default_logger(logger);
+  spdlog::flush_every(std::chrono::seconds(1));
+}
 
 int main(int argc, char *argv[]) {
   const QCoreApplication a(argc, argv);
   QCoreApplication::setApplicationName("LanChatServer");
   QCoreApplication::setApplicationVersion("0.1");
+
+  setupServerLogger();
 
   const QString configPath =
       QCoreApplication::applicationDirPath() + "/config.ini";
@@ -34,8 +53,8 @@ int main(int argc, char *argv[]) {
 
   const QString dbPass = settings.value("Database/Password", "").toString();
   if (dbPass.isEmpty()) {
-    std::cerr << "[Fatal Error] Database password is not set in config.ini!"
-              << std::endl;
+    spdlog::error("Database password is not set in config.ini!");
+
     return 1;
   }
 

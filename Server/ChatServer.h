@@ -2,7 +2,6 @@
 
 #include "DatabaseManager.h"
 
-#include <QDebug>
 #include <QList>
 #include <QTcpServer>
 #include <QTcpSocket>

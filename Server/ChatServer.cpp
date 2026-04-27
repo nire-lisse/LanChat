@@ -1,8 +1,5 @@
 #include "ChatServer.h"
 
-#include <iostream>
-#include <print>
-
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QJsonObject>
@@ -10,22 +7,20 @@
 
 #include "CryptoHelper.h"
 #include "DatabaseManager.h"
+#include "spdlog/spdlog.h"
 
-ChatServer::ChatServer(const quint16 port, DatabaseManager *dbManager,
-                       QObject *parent)
+ChatServer::ChatServer(const quint16 port, DatabaseManager *db, QObject *parent)
     : QObject(parent) {
-  m_dbManager = dbManager;
+  m_dbManager = db;
 
   m_server = new QTcpServer(this);
   connect(m_server, &QTcpServer::newConnection, this,
           &ChatServer::onNewConnection);
 
-  if (m_server->listen(QHostAddress::Any, port)) {
-    std::println("Server started on port {}", port);
-  } else {
-    std::cerr << "[Error] Server failed: "
-              << m_server->errorString().toStdString() << std::endl;
-  }
+  if (m_server->listen(QHostAddress::Any, port))
+    spdlog::info("Server started on port {}", port);
+  else
+    spdlog::error("Server failed: {}", m_server->errorString().toStdString());
 }
 
 ChatServer::~ChatServer() {
@@ -42,7 +37,7 @@ void ChatServer::onNewConnection() {
 
   const auto clientAddress = clientSocket->peerAddress();
 
-  std::println(">>> NEW CONNECTION from: {}",
+  spdlog::info(">>> New connection from: {}",
                clientAddress.toString().toStdString());
 
   connect(clientSocket, &QTcpSocket::readyRead, this,
@@ -77,7 +72,8 @@ void ChatServer::onClientReadyRead() {
   else if (type == "message" && isAuthorized)
     handleChatMessage(senderSocket, json);
   else {
-    std::println("Invalid packet sequence or unknown type.");
+    spdlog::error("({}) Invalid packet sequence or unknown type.",
+                  senderSocket->peerAddress().toString().toStdString());
 
     senderSocket->disconnectFromHost();
   }
@@ -91,7 +87,7 @@ void ChatServer::onClientDisconnected() {
   std::string ip = senderSocket->peerAddress().toString().toStdString();
 
   m_clients.removeAll(senderSocket);
-  std::println("Client disconnected: {}", ip);
+  spdlog::info("Client disconnected: {}", ip);
 
   senderSocket->deleteLater();
 }
@@ -113,7 +109,7 @@ void ChatServer::handleAuthRequest(QTcpSocket *senderSocket,
   auto authResult = m_dbManager->checkAuth(login, hash);
 
   if (!authResult.isValid) {
-    std::println("Auth failed for login: {}", login.toStdString());
+    spdlog::error("Auth failed for login: {}", login.toStdString());
     senderSocket->disconnectFromHost();
 
     return;
@@ -123,7 +119,7 @@ void ChatServer::handleAuthRequest(QTcpSocket *senderSocket,
   senderSocket->setProperty("nickname", authResult.nickname);
 
   if (authResult.requiresPasswordChange) {
-    std::println("User '{}' needs to change password.", login.toStdString());
+    spdlog::warn("User '{}' needs to change password.", login.toStdString());
 
     QJsonObject response;
     response["type"] = "auth_response";
@@ -135,7 +131,7 @@ void ChatServer::handleAuthRequest(QTcpSocket *senderSocket,
     senderSocket->write(outData);
   } else {
     senderSocket->setProperty("isAuthorized", true);
-    std::println("User '{}' authorized successfully as '{}'",
+    spdlog::info("User '{}' authorized successfully as '{}'",
                  login.toStdString(), authResult.nickname.toStdString());
 
     QJsonObject successMsg;
@@ -153,9 +149,8 @@ void ChatServer::handleAuthRequest(QTcpSocket *senderSocket,
 
 void ChatServer::handleChatMessage(const QTcpSocket *senderSocket,
                                    const QJsonObject &json) {
-  if (json["type"].toString() != "message") {
+  if (json["type"].toString() != "message")
     return;
-  }
 
   const QString nickname = senderSocket->property("nickname").toString();
 
@@ -178,7 +173,7 @@ void ChatServer::handleChangePasswordRequest(QTcpSocket *senderSocket,
   const QString login = senderSocket->property("login").toString();
 
   if (login.isEmpty()) {
-    std::println("Password change attempt without login.");
+    spdlog::error("Password change attempt without login.");
     senderSocket->disconnectFromHost();
     return;
   }
@@ -206,7 +201,7 @@ void ChatServer::handleChangePasswordRequest(QTcpSocket *senderSocket,
   }
 
   if (m_dbManager->setPassword(login, newPassword, true)) {
-    std::println("User '{}' successfully updated their password.",
+    spdlog::info("User '{}' successfully updated their password.",
                  login.toStdString());
 
     QJsonObject response;
@@ -230,8 +225,8 @@ void ChatServer::handleChangePasswordRequest(QTcpSocket *senderSocket,
         QJsonDocument(response).toJson(QJsonDocument::Compact));
     senderSocket->write(outData);
   } else {
-    std::println("Database error while changing password for '{}'.",
-                 login.toStdString());
+    spdlog::error("Database error while changing password for '{}'.",
+                  login.toStdString());
     senderSocket->disconnectFromHost();
   }
 }

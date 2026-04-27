@@ -1,6 +1,7 @@
 #pragma once
 #include "../../DatabaseManager.h"
 #include "Command.h"
+#include "spdlog/spdlog.h"
 
 class UserAddCommand : public Command {
   DatabaseManager *m_db;
@@ -12,10 +13,9 @@ public:
         m_db(dbManager) {}
 
   void execute(const QStringList &args) override {
-    if (m_db->addUser(args[0], args[1], args[2])) {
-      std::println("[Success] User '{}' added.", args[0].toStdString());
-    } else {
-      std::println("[Error] Failed to add user.");
-    }
+    if (m_db->addUser(args[0], args[1], args[2]))
+      spdlog::info("User '{}' added.", args[0].toStdString());
+    else
+      spdlog::warn("Failed to add user.");
   }
 };
