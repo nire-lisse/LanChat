@@ -1,6 +1,4 @@
 add_library(LanChatCommon STATIC
-        CryptoHelper.h
-        CryptoHelper.cpp
         Command.cpp
         Command.h
 )

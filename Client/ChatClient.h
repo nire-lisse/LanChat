@@ -2,7 +2,7 @@
 
 #include <QJsonObject>
 #include <QSocketNotifier>
-#include <QTcpSocket>
+#include <QSslSocket>
 #include <QTextStream>
 #include <memory>
 
@@ -30,7 +30,7 @@ private slots:
   void onUserInput();
 
 private:
-  QTcpSocket *m_socket;
+  QSslSocket *m_socket;
   QSocketNotifier *m_stdinNotifier;
   QTextStream m_input;
 

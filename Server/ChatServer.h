@@ -3,8 +3,8 @@
 #include "DatabaseManager.h"
 
 #include <QList>
-#include <QTcpServer>
-#include <QTcpSocket>
+#include <QSslServer>
+#include <QSslSocket>
 
 class ChatServer : public QObject {
   Q_OBJECT
@@ -22,15 +22,15 @@ private slots:
 
   void onClientDisconnected();
 
-  void handleAuthRequest(QTcpSocket *senderSocket, const QJsonObject &json);
-  void handleChatMessage(const QTcpSocket *senderSocket,
+  void handleAuthRequest(QSslSocket *senderSocket, const QJsonObject &json);
+  void handleChatMessage(const QSslSocket *senderSocket,
                          const QJsonObject &json);
-  void handleChangePasswordRequest(QTcpSocket *senderSocket,
+  void handleChangePasswordRequest(QSslSocket *senderSocket,
                                    const QJsonObject &json);
 
 private:
-  QTcpServer *m_server;
-  QList<QTcpSocket *> m_clients;
+  QSslServer *m_server;
+  QList<QSslSocket *> m_clients;
 
   DatabaseManager *m_dbManager;
 };

@@ -2,20 +2,46 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QFile>
 #include <QJsonObject>
 #include <QSettings>
+#include <QSslCertificate>
+#include <QSslConfiguration>
+#include <QSslKey>
 
-#include "CryptoHelper.h"
 #include "DatabaseManager.h"
 #include "spdlog/spdlog.h"
+
+void setupSsl(QSslServer *server) {
+  QFile certFile("server.crt");
+  QFile keyFile("server.key");
+
+  if (certFile.open(QIODevice::ReadOnly) && keyFile.open(QIODevice::ReadOnly)) {
+    const QSslCertificate cert(&certFile, QSsl::Pem);
+    const QSslKey key(&keyFile, QSsl::Rsa, QSsl::Pem);
+
+    QSslConfiguration sslConfig = QSslConfiguration::defaultConfiguration();
+    sslConfig.setLocalCertificate(cert);
+    sslConfig.setPrivateKey(key);
+    sslConfig.setPeerVerifyMode(
+        QSslSocket::VerifyNone); // Не вимагаємо сертифікат від клієнта
+
+    server->setSslConfiguration(sslConfig);
+    spdlog::info("SSL Certificates loaded!");
+  } else {
+    spdlog::error("Failed to load server.crt or server.key");
+  }
+}
 
 ChatServer::ChatServer(const quint16 port, DatabaseManager *db, QObject *parent)
     : QObject(parent) {
   m_dbManager = db;
 
-  m_server = new QTcpServer(this);
-  connect(m_server, &QTcpServer::newConnection, this,
+  m_server = new QSslServer(this);
+  connect(m_server, &QSslServer::pendingConnectionAvailable, this,
           &ChatServer::onNewConnection);
+
+  setupSsl(m_server);
 
   if (m_server->listen(QHostAddress::Any, port))
     spdlog::info("Server started on port {}", port);
@@ -24,7 +50,7 @@ ChatServer::ChatServer(const quint16 port, DatabaseManager *db, QObject *parent)
 }
 
 ChatServer::~ChatServer() {
-  for (QTcpSocket *socket : m_clients) {
+  for (QSslSocket *socket : m_clients) {
     socket->close();
     socket->deleteLater();
   }
@@ -32,7 +58,8 @@ ChatServer::~ChatServer() {
 }
 
 void ChatServer::onNewConnection() {
-  QTcpSocket *clientSocket = m_server->nextPendingConnection();
+  QSslSocket *clientSocket =
+      qobject_cast<QSslSocket *>(m_server->nextPendingConnection());
   m_clients.append(clientSocket);
 
   const auto clientAddress = clientSocket->peerAddress();
@@ -40,22 +67,30 @@ void ChatServer::onNewConnection() {
   spdlog::info(">>> New connection from: {}",
                clientAddress.toString().toStdString());
 
-  connect(clientSocket, &QTcpSocket::readyRead, this,
+  connect(clientSocket, &QSslSocket::readyRead, this,
           &ChatServer::onClientReadyRead);
-  connect(clientSocket, &QTcpSocket::disconnected, this,
+  connect(clientSocket, &QSslSocket::disconnected, this,
           &ChatServer::onClientDisconnected);
+
+  connect(clientSocket, &QAbstractSocket::errorOccurred, this,
+          [clientSocket](QAbstractSocket::SocketError socketError) {
+            if (socketError != QAbstractSocket::RemoteHostClosedError) {
+              spdlog::warn("Socket error for {}: {}",
+                           clientSocket->peerAddress().toString().toStdString(),
+                           clientSocket->errorString().toStdString());
+            }
+          });
 }
 
 void ChatServer::onClientReadyRead() {
-  const auto senderSocket = qobject_cast<QTcpSocket *>(sender());
+  const auto senderSocket = qobject_cast<QSslSocket *>(sender());
   if (!senderSocket)
     return;
 
   const QByteArray data = senderSocket->readAll();
-  const QByteArray decryptedData = CryptoHelper::autoProcess(data);
 
   QJsonParseError error;
-  const QJsonDocument doc = QJsonDocument::fromJson(decryptedData, &error);
+  const QJsonDocument doc = QJsonDocument::fromJson(data, &error);
 
   if (error.error != QJsonParseError::NoError)
     return;
@@ -80,7 +115,7 @@ void ChatServer::onClientReadyRead() {
 }
 
 void ChatServer::onClientDisconnected() {
-  const auto senderSocket = qobject_cast<QTcpSocket *>(sender());
+  const auto senderSocket = qobject_cast<QSslSocket *>(sender());
   if (!senderSocket)
     return;
 
@@ -92,13 +127,8 @@ void ChatServer::onClientDisconnected() {
   senderSocket->deleteLater();
 }
 
-void ChatServer::handleAuthRequest(QTcpSocket *senderSocket,
+void ChatServer::handleAuthRequest(QSslSocket *senderSocket,
                                    const QJsonObject &json) {
-  if (json["type"].toString() != "auth") {
-    senderSocket->disconnectFromHost();
-    return;
-  }
-
   const QString login = json["login"].toString();
   const QString password = json["password"].toString();
 
@@ -121,54 +151,44 @@ void ChatServer::handleAuthRequest(QTcpSocket *senderSocket,
   if (authResult.requiresPasswordChange) {
     spdlog::warn("User '{}' needs to change password.", login.toStdString());
 
-    QJsonObject response;
-    response["type"] = "auth_response";
-    response["status"] = "force_change";
-    response["text"] = "You must change your password to continue.";
+    const QJsonObject response{
+        {"type", "auth_response"},
+        {"status", "force_change"},
+        {"text", "You must change your password to continue."}};
 
-    const QByteArray outData = CryptoHelper::autoProcess(
-        QJsonDocument(response).toJson(QJsonDocument::Compact));
-    senderSocket->write(outData);
+    senderSocket->write(QJsonDocument(response).toJson(QJsonDocument::Compact));
   } else {
     senderSocket->setProperty("isAuthorized", true);
     spdlog::info("User '{}' authorized successfully as '{}'",
                  login.toStdString(), authResult.nickname.toStdString());
 
-    QJsonObject successMsg;
-    successMsg["type"] = "auth_response";
-    successMsg["status"] = "success";
-    successMsg["nick"] = "System";
-    successMsg["text"] =
-        "Auth successful. Welcome, " + authResult.nickname + "!";
+    const QJsonObject successMsg{
+        {"type", "auth_response"},
+        {"status", "success"},
+        {"nick", "System"},
+        {"text", "Auth successful. Welcome, " + authResult.nickname + "!"}};
 
-    const QByteArray outData = CryptoHelper::autoProcess(
+    senderSocket->write(
         QJsonDocument(successMsg).toJson(QJsonDocument::Compact));
-    senderSocket->write(outData);
   }
 }
 
-void ChatServer::handleChatMessage(const QTcpSocket *senderSocket,
+void ChatServer::handleChatMessage(const QSslSocket *senderSocket,
                                    const QJsonObject &json) {
-  if (json["type"].toString() != "message")
-    return;
-
   const QString nickname = senderSocket->property("nickname").toString();
 
-  QJsonObject outJson;
-  outJson["nick"] = nickname;
-  outJson["text"] = json["text"].toString();
+  const QJsonObject outJson{{"type", "message"},
+                            {"nick", nickname},
+                            {"text", json["text"].toString()}};
 
-  QByteArray outData = QJsonDocument(outJson).toJson(QJsonDocument::Compact);
-  outData = CryptoHelper::autoProcess(outData);
-
-  for (QTcpSocket *socket : m_clients) {
+  for (QSslSocket *socket : m_clients) {
     if (socket != senderSocket && socket->property("isAuthorized").toBool()) {
-      socket->write(outData);
+      socket->write(QJsonDocument(outJson).toJson(QJsonDocument::Compact));
     }
   }
 }
 
-void ChatServer::handleChangePasswordRequest(QTcpSocket *senderSocket,
+void ChatServer::handleChangePasswordRequest(QSslSocket *senderSocket,
                                              const QJsonObject &json) {
   const QString login = senderSocket->property("login").toString();
 
@@ -194,8 +214,8 @@ void ChatServer::handleChangePasswordRequest(QTcpSocket *senderSocket,
     if (!m_dbManager->checkAuth(login, hash).isValid) {
       const QJsonObject response{{"type", "error"},
                                  {"text", "Wrong old password"}};
-      senderSocket->write(CryptoHelper::autoProcess(
-          QJsonDocument(response).toJson(QJsonDocument::Compact)));
+      senderSocket->write(
+          QJsonDocument(response).toJson(QJsonDocument::Compact));
       return;
     }
   }
@@ -221,9 +241,7 @@ void ChatServer::handleChangePasswordRequest(QTcpSocket *senderSocket,
       response["text"] = "Your password has been successfully updated.";
     }
 
-    const QByteArray outData = CryptoHelper::autoProcess(
-        QJsonDocument(response).toJson(QJsonDocument::Compact));
-    senderSocket->write(outData);
+    senderSocket->write(QJsonDocument(response).toJson(QJsonDocument::Compact));
   } else {
     spdlog::error("Database error while changing password for '{}'.",
                   login.toStdString());
