@@ -3,13 +3,14 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QFile>
-#include <QJsonObject>
+#include <QJsonArray>
 #include <QSettings>
 #include <QSslCertificate>
 #include <QSslConfiguration>
 #include <QSslKey>
 
 #include "DatabaseManager.h"
+#include "NetworkUtils.h"
 #include "spdlog/spdlog.h"
 
 void setupSsl(QSslServer *server) {
@@ -23,8 +24,7 @@ void setupSsl(QSslServer *server) {
     QSslConfiguration sslConfig = QSslConfiguration::defaultConfiguration();
     sslConfig.setLocalCertificate(cert);
     sslConfig.setPrivateKey(key);
-    sslConfig.setPeerVerifyMode(
-        QSslSocket::VerifyNone); // Не вимагаємо сертифікат від клієнта
+    sslConfig.setPeerVerifyMode(QSslSocket::VerifyNone);
 
     server->setSslConfiguration(sslConfig);
     spdlog::info("SSL Certificates loaded!");
@@ -87,30 +87,47 @@ void ChatServer::onClientReadyRead() {
   if (!senderSocket)
     return;
 
-  const QByteArray data = senderSocket->readAll();
+  QDataStream in(senderSocket);
+  in.setVersion(QDataStream::Qt_6_0);
 
-  QJsonParseError error;
-  const QJsonDocument doc = QJsonDocument::fromJson(data, &error);
+  in.startTransaction();
+  QByteArray data;
+  in >> data;
 
-  if (error.error != QJsonParseError::NoError)
-    return;
+  while (in.commitTransaction()) {
+    QJsonParseError error;
+    const QJsonDocument doc = QJsonDocument::fromJson(data, &error);
 
-  const QJsonObject json = doc.object();
-  const QString type = json["type"].toString();
+    if (error.error == QJsonParseError::NoError) {
+      const QJsonObject json = doc.object();
+      const QString type = json["type"].toString();
 
-  bool isAuthorized = senderSocket->property("isAuthorized").toBool();
+      bool isAuthorized = senderSocket->property("isAuthorized").toBool();
 
-  if (type == "auth" && !isAuthorized)
-    handleAuthRequest(senderSocket, json);
-  else if (type == "change_password")
-    handleChangePasswordRequest(senderSocket, json);
-  else if (type == "message" && isAuthorized)
-    handleChatMessage(senderSocket, json);
-  else {
-    spdlog::error("({}) Invalid packet sequence or unknown type.",
-                  senderSocket->peerAddress().toString().toStdString());
+      if (type == "auth" && !isAuthorized)
+        handleAuthRequest(senderSocket, json);
+      else if (type == "change_password")
+        handleChangePasswordRequest(senderSocket, json);
+      else if (type == "message" && isAuthorized)
+        handleChatMessage(senderSocket, json);
+      else if (type == "get_history" && isAuthorized)
+        handleHistoryRequest(senderSocket, json);
+      else if (type == "edit_message" && isAuthorized)
+        handleEditMessageRequest(senderSocket, json);
+      else if (type == "pin_message" && isAuthorized)
+        handlePinMessageRequest(senderSocket, json);
+      else {
+        spdlog::error("({}) Invalid packet sequence or unknown type.",
+                      senderSocket->peerAddress().toString().toStdString());
 
-    senderSocket->disconnectFromHost();
+        senderSocket->disconnectFromHost();
+      }
+    } else {
+      spdlog::error("JSON parse error: {}", error.errorString().toStdString());
+    }
+
+    in.startTransaction();
+    in >> data;
   }
 }
 
@@ -128,7 +145,7 @@ void ChatServer::onClientDisconnected() {
 }
 
 void ChatServer::handleAuthRequest(QSslSocket *senderSocket,
-                                   const QJsonObject &json) {
+                                   const QJsonObject &json) const {
   const QString login = json["login"].toString();
   const QString password = json["password"].toString();
 
@@ -145,6 +162,7 @@ void ChatServer::handleAuthRequest(QSslSocket *senderSocket,
     return;
   }
 
+  senderSocket->setProperty("user_id", authResult.id);
   senderSocket->setProperty("login", login);
   senderSocket->setProperty("nickname", authResult.nickname);
 
@@ -156,7 +174,7 @@ void ChatServer::handleAuthRequest(QSslSocket *senderSocket,
         {"status", "force_change"},
         {"text", "You must change your password to continue."}};
 
-    senderSocket->write(QJsonDocument(response).toJson(QJsonDocument::Compact));
+    NetworkUtils::sendJson(senderSocket, response);
   } else {
     senderSocket->setProperty("isAuthorized", true);
     spdlog::info("User '{}' authorized successfully as '{}'",
@@ -168,28 +186,50 @@ void ChatServer::handleAuthRequest(QSslSocket *senderSocket,
         {"nick", "System"},
         {"text", "Auth successful. Welcome, " + authResult.nickname + "!"}};
 
-    senderSocket->write(
-        QJsonDocument(successMsg).toJson(QJsonDocument::Compact));
+    NetworkUtils::sendJson(senderSocket, successMsg);
+
+    QJsonArray history = m_dbManager->getRoomHistory(1);
+    QJsonArray pinned = m_dbManager->getPinnedMessages(1);
+
+    const QJsonObject historyMsg{{"type", "history_response"},
+                                 {"messages", history},
+                                 {"pinned_messages", pinned}};
+
+    NetworkUtils::sendJson(senderSocket, historyMsg);
   }
 }
 
 void ChatServer::handleChatMessage(const QSslSocket *senderSocket,
                                    const QJsonObject &json) {
   const QString nickname = senderSocket->property("nickname").toString();
+  const int userId = senderSocket->property("user_id").toInt();
+  const QString text = json["text"].toString();
 
-  const QJsonObject outJson{{"type", "message"},
-                            {"nick", nickname},
-                            {"text", json["text"].toString()}};
+  QJsonObject savedData = m_dbManager->saveMessage(1, userId, text);
 
-  for (QSslSocket *socket : m_clients) {
-    if (socket != senderSocket && socket->property("isAuthorized").toBool()) {
-      socket->write(QJsonDocument(outJson).toJson(QJsonDocument::Compact));
-    }
+  if (savedData.isEmpty()) {
+    spdlog::error("Failed to save message from user ID: {}", userId);
+    return;
   }
+
+  QJsonObject outJson{{"type", "message"},
+                      {"id", savedData["id"].toVariant().toLongLong()},
+                      {"nick", nickname},
+                      {"text", text},
+                      {"sent_at", savedData["sent_at"].toString()},
+                      {"is_pinned", false}};
+
+  if (savedData.contains("metadata")) {
+    outJson["metadata"] = savedData["metadata"];
+  }
+
+  for (QSslSocket *socket : m_clients)
+    if (socket != senderSocket && socket->property("isAuthorized").toBool())
+      NetworkUtils::sendJson(socket, outJson);
 }
 
 void ChatServer::handleChangePasswordRequest(QSslSocket *senderSocket,
-                                             const QJsonObject &json) {
+                                             const QJsonObject &json) const {
   const QString login = senderSocket->property("login").toString();
 
   if (login.isEmpty()) {
@@ -214,8 +254,8 @@ void ChatServer::handleChangePasswordRequest(QSslSocket *senderSocket,
     if (!m_dbManager->checkAuth(login, hash).isValid) {
       const QJsonObject response{{"type", "error"},
                                  {"text", "Wrong old password"}};
-      senderSocket->write(
-          QJsonDocument(response).toJson(QJsonDocument::Compact));
+
+      NetworkUtils::sendJson(senderSocket, response);
       return;
     }
   }
@@ -241,10 +281,55 @@ void ChatServer::handleChangePasswordRequest(QSslSocket *senderSocket,
       response["text"] = "Your password has been successfully updated.";
     }
 
-    senderSocket->write(QJsonDocument(response).toJson(QJsonDocument::Compact));
+    NetworkUtils::sendJson(senderSocket, response);
   } else {
     spdlog::error("Database error while changing password for '{}'.",
                   login.toStdString());
+
     senderSocket->disconnectFromHost();
+  }
+}
+
+void ChatServer::handleHistoryRequest(QSslSocket *senderSocket,
+                                      const QJsonObject &json) const {
+  const qint64 beforeId = json["before_id"].toVariant().toLongLong();
+  const int roomId = json.contains("room_id") ? json["room_id"].toInt() : 1;
+
+  QJsonArray history = m_dbManager->getRoomHistory(roomId, beforeId);
+
+  const QJsonObject historyMsg{{"type", "history_response"},
+                               {"messages", history}};
+
+  NetworkUtils::sendJson(senderSocket, historyMsg);
+}
+
+void ChatServer::handleEditMessageRequest(const QSslSocket *senderSocket,
+                                          const QJsonObject &json) {
+  const int userId = senderSocket->property("user_id").toInt();
+  const qint64 messageId = json["id"].toVariant().toLongLong();
+  const QString newText = json["text"].toString();
+
+  if (m_dbManager->updateMessage(messageId, userId, newText)) {
+    const QJsonObject outJson{
+        {"type", "message_edited"}, {"id", messageId}, {"text", newText}};
+
+    for (QSslSocket *socket : m_clients)
+      if (socket->property("isAuthorized").toBool())
+        NetworkUtils::sendJson(socket, outJson);
+  }
+}
+
+void ChatServer::handlePinMessageRequest(QSslSocket *senderSocket,
+                                         const QJsonObject &json) {
+  const qint64 messageId = json["id"].toVariant().toLongLong();
+  const bool isPinned = json["is_pinned"].toBool();
+
+  if (m_dbManager->setMessagePinned(messageId, isPinned)) {
+    const QJsonObject outJson{
+        {"type", "message_pinned"}, {"id", messageId}, {"is_pinned", isPinned}};
+
+    for (QSslSocket *socket : m_clients)
+      if (socket->property("isAuthorized").toBool())
+        NetworkUtils::sendJson(socket, outJson);
   }
 }

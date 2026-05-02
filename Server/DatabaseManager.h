@@ -13,6 +13,7 @@ public:
 
   struct AuthResult {
     bool isValid = false;
+    int id = -1;
     QString nickname;
     bool requiresPasswordChange = false;
   };
@@ -32,4 +33,15 @@ public:
   bool setPassword(const QString &login, const QString &newPassword,
                    bool isChangedByUser = false);
   bool deleteUser(const QString &login);
+
+  QJsonObject saveMessage(int roomId, int senderId, const QString &text);
+  bool updateMessage(qint64 messageId, int senderId, const QString &newText);
+
+  QJsonArray getRoomHistory(int roomId, qint64 beforeId = 0, int limit = 50);
+
+  bool setMessagePinned(qint64 messageId, bool isPinned);
+  QJsonArray getPinnedMessages(int roomId);
+
+private:
+  void initTables();
 };

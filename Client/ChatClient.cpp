@@ -1,14 +1,16 @@
 #include "ChatClient.h"
 
-#include <print>
-
-#include "Commands/ClientCommandRegistry.h"
-
 #include <QCoreApplication>
+#include <QJsonArray>
 #include <QJsonObject>
+#include <QJsonValue>
 #include <QSslConfiguration>
 
 #include <iostream>
+#include <print>
+
+#include "Commands/ClientCommandRegistry.h"
+#include "NetworkUtils.h"
 
 ChatClient::ChatClient(QObject *parent) : QObject(parent), m_input(stdin) {
   m_socket = new QSslSocket(this);
@@ -74,29 +76,44 @@ void ChatClient::onConnected() {
 }
 
 void ChatClient::onReadyRead() {
-  const auto data = m_socket->readAll();
+  QDataStream in(m_socket);
+  in.setVersion(QDataStream::Qt_6_0);
 
-  QJsonParseError error;
-  const QJsonDocument doc = QJsonDocument::fromJson(data, &error);
+  in.startTransaction();
+  QByteArray data;
+  in >> data;
 
-  if (error.error != QJsonParseError::NoError) {
-    std::println("[System]: Error decrypting message");
-    return;
-  }
+  while (in.commitTransaction()) {
+    QJsonParseError error;
+    const QJsonDocument doc = QJsonDocument::fromJson(data, &error);
 
-  const QJsonObject json = doc.object();
-  const QString type = json["type"].toString();
+    if (error.error == QJsonParseError::NoError) {
+      const QJsonObject json = doc.object();
+      const QString type = json["type"].toString();
 
-  if (type == "auth_response") {
-    handleAuthResponse(json);
-  } else if (type == "message") {
-    handleIncomingMessage(json);
-  } else if (type == "system_message") {
-    handleSystemMessage(json);
-  } else if (type == "error") {
-    std::println("[Server Error] {}", json["text"].toString().toStdString());
-  } else {
-    std::println("[Warning] Unknown packet type: {}", type.toStdString());
+      if (type == "auth_response")
+        handleAuthResponse(json);
+      else if (type == "message")
+        handleIncomingMessage(json);
+      else if (type == "system_message")
+        handleSystemMessage(json);
+      else if (type == "history_response")
+        handleHistoryResponse(json);
+      else if (type == "message_edited")
+        handleMessageEdited(json);
+      else if (type == "message_pinned")
+        handleMessagePinned(json);
+      else if (type == "error")
+        std::println("[Server Error] {}",
+                     json["text"].toString().toStdString());
+      else
+        std::println("[Warning] Unknown packet type: {}", type.toStdString());
+    } else {
+      std::println("[System]: Error decrypting/parsing message");
+    }
+
+    in.startTransaction();
+    in >> data;
   }
 }
 
@@ -122,8 +139,7 @@ void ChatClient::sendAuth(const QString &login, const QString &password) const {
   const QJsonObject authMsg{
       {"type", "auth"}, {"login", login}, {"password", password}};
 
-  m_socket->write(QJsonDocument(authMsg).toJson(QJsonDocument::Compact));
-  m_socket->flush();
+  NetworkUtils::sendJson(m_socket, authMsg);
 }
 
 void ChatClient::sendChangePassword(const QString &newPassword,
@@ -134,15 +150,13 @@ void ChatClient::sendChangePassword(const QString &newPassword,
     msg["old_password"] = oldPassword;
   }
 
-  m_socket->write(QJsonDocument(msg).toJson(QJsonDocument::Compact));
-  m_socket->flush();
+  NetworkUtils::sendJson(m_socket, msg);
 }
 
 void ChatClient::sendChatMessage(const QString &text) const {
   const QJsonObject message{{"type", "message"}, {"text", text}};
 
-  m_socket->write(QJsonDocument(message).toJson(QJsonDocument::Compact));
-  m_socket->flush();
+  NetworkUtils::sendJson(m_socket, message);
 }
 
 void ChatClient::handleAuthResponse(const QJsonObject &json) {
@@ -160,10 +174,91 @@ void ChatClient::handleAuthResponse(const QJsonObject &json) {
 }
 
 void ChatClient::handleIncomingMessage(const QJsonObject &json) {
-  std::println("[{}]: {}", json["nick"].toString().toStdString(),
-               json["text"].toString().toStdString());
+  printMessage(json);
 }
 
 void ChatClient::handleSystemMessage(const QJsonObject &json) {
   std::println("[System] {}", json["text"].toString().toStdString());
+}
+
+void ChatClient::sendEditMessage(const qint64 messageId,
+                                 const QString &newText) const {
+  const QJsonObject msg{
+      {"type", "edit_message"}, {"id", messageId}, {"text", newText}};
+
+  NetworkUtils::sendJson(m_socket, msg);
+}
+
+void ChatClient::sendPinMessage(const qint64 messageId,
+                                const bool isPinned) const {
+  const QJsonObject msg{
+      {"type", "pin_message"}, {"id", messageId}, {"is_pinned", isPinned}};
+
+  NetworkUtils::sendJson(m_socket, msg);
+}
+
+void ChatClient::sendHistoryRequest(const qint64 beforeId) const {
+  QJsonObject msg{{"type", "get_history"}};
+
+  if (beforeId > 0)
+    msg["before_id"] = beforeId;
+
+  NetworkUtils::sendJson(m_socket, msg);
+}
+
+void ChatClient::printMessage(const QJsonObject &msgJson) {
+  const qint64 id = msgJson["id"].toVariant().toLongLong();
+  const QString nick = msgJson["nick"].toString();
+  const QString text = msgJson["text"].toString();
+
+  QString timeStr = "";
+  if (msgJson.contains("sent_at")) {
+    const QDateTime sentAt =
+        QDateTime::fromString(msgJson["sent_at"].toString(), Qt::ISODate);
+    timeStr = sentAt.toLocalTime().toString("HH:mm");
+  }
+
+  const QString pinMarker = msgJson["is_pinned"].toBool() ? " [📌 PINNED]" : "";
+
+  const QString editMarker = msgJson.contains("updated_at") ? " (edited)" : "";
+
+  std::println("[ID:{}] [{}] {}{}: {}{}", id, timeStr.toStdString(),
+               nick.toStdString(), pinMarker.toStdString(), text.toStdString(),
+               editMarker.toStdString());
+}
+
+void ChatClient::handleHistoryResponse(const QJsonObject &json) {
+  if (json.contains("pinned_messages")) {
+    const QJsonArray pinned = json["pinned_messages"].toArray();
+    if (!pinned.isEmpty()) {
+      std::println("--- Pinned Messages ---");
+
+      for (const auto &val : pinned)
+        printMessage(val.toObject());
+
+      std::println("-----------------------");
+    }
+  }
+
+  const QJsonArray messages = json["messages"].toArray();
+  for (const auto &val : messages)
+    printMessage(val.toObject());
+
+  std::println("--------------------");
+}
+
+void ChatClient::handleMessageEdited(const QJsonObject &json) {
+  const qint64 id = json["id"].toVariant().toLongLong();
+  const QString text = json["text"].toString();
+  std::println("[System] Message ID:{} was edited. New text: {}", id,
+               text.toStdString());
+}
+
+void ChatClient::handleMessagePinned(const QJsonObject &json) {
+  const qint64 id = json["id"].toVariant().toLongLong();
+
+  if (json["is_pinned"].toBool())
+    std::println("[System] Message ID:{} was PINNED.", id);
+  else
+    std::println("[System] Message ID:{} was UNPINNED.", id);
 }

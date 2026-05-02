@@ -21,6 +21,9 @@ public:
   void sendChangePassword(const QString &newPassword,
                           const QString &oldPassword = "") const;
   void sendChatMessage(const QString &text) const;
+  void sendEditMessage(qint64 messageId, const QString &newText) const;
+  void sendPinMessage(qint64 messageId, bool isPinned) const;
+  void sendHistoryRequest(qint64 beforeId = 0) const;
 
 private slots:
   void onConnected();
@@ -43,4 +46,9 @@ private:
   void handleAuthResponse(const QJsonObject &json);
   void handleIncomingMessage(const QJsonObject &json);
   void handleSystemMessage(const QJsonObject &json);
+  void handleHistoryResponse(const QJsonObject &json);
+  void handleMessageEdited(const QJsonObject &json);
+  void handleMessagePinned(const QJsonObject &json);
+
+  void printMessage(const QJsonObject &msgJson);
 };

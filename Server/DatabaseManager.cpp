@@ -1,10 +1,12 @@
 #include "DatabaseManager.h"
 
 #include <QCryptographicHash>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QSqlError>
 #include <QSqlQuery>
-#include <iostream>
-#include <print>
+
+#include "spdlog/spdlog.h"
 
 DatabaseManager::DatabaseManager(QObject *parent) : QObject(parent) {}
 
@@ -24,13 +26,57 @@ bool DatabaseManager::connectToDatabase(const QString &host,
   db.setPassword(pass);
 
   if (!db.open()) {
-    std::cerr << "[DB Error] Failed to connect: "
-              << db.lastError().text().toStdString() << std::endl;
+    spdlog::error("[DB] Failed to connect: {}",
+                  db.lastError().text().toStdString());
     return false;
   }
 
-  std::println("Database connected successfully.");
+  spdlog::info("[DB] Database connected successfully.");
+
+  initTables();
+
   return true;
+}
+
+void DatabaseManager::initTables() {
+  QSqlQuery query;
+
+  if (!query.exec(R"(
+        CREATE TABLE IF NOT EXISTS users (
+            id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            login VARCHAR(255) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            nickname VARCHAR(255) NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            deleted_at TIMESTAMPTZ DEFAULT NULL,
+            password_changed BOOLEAN DEFAULT FALSE
+        )
+    )")) {
+    spdlog::error("Failed to create users table: {}",
+                  query.lastError().text().toStdString());
+  }
+
+  if (!query.exec(R"(
+        CREATE TABLE IF NOT EXISTS messages (
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            room_id INT NOT NULL,
+            sender_id INT NOT NULL,
+            text TEXT,
+            sent_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NULL,
+            is_deleted BOOLEAN DEFAULT FALSE,
+            is_pinned BOOLEAN DEFAULT FALSE,
+            metadata JSONB DEFAULT '{}'::jsonb
+        )
+    )")) {
+    spdlog::error("Failed to create messages table: {}",
+                  query.lastError().text().toStdString());
+  }
+
+  query.exec("CREATE INDEX IF NOT EXISTS idx_messages_room_id ON "
+             "messages(room_id, id DESC)");
+  query.exec("CREATE INDEX IF NOT EXISTS idx_pinned_messages ON "
+             "messages(room_id) WHERE is_pinned = TRUE");
 }
 
 DatabaseManager::AuthResult DatabaseManager::checkAuth(const QString &login,
@@ -38,16 +84,20 @@ DatabaseManager::AuthResult DatabaseManager::checkAuth(const QString &login,
   AuthResult result;
 
   QSqlQuery query;
-  query.prepare(
-      "SELECT nickname, password_changed FROM users WHERE login = :login AND "
-      "password_hash = :hash AND deleted_at IS NULL");
+  query.prepare("SELECT id, nickname, password_changed FROM users WHERE login "
+                "= :login AND "
+                "password_hash = :hash AND deleted_at IS NULL");
   query.bindValue(":login", login);
   query.bindValue(":hash", hash);
 
   if (query.exec() && query.next()) {
     result.isValid = true;
-    result.nickname = query.value(0).toString();
-    result.requiresPasswordChange = !query.value(1).toBool();
+    result.id = query.value(0).toInt();
+    result.nickname = query.value(1).toString();
+    result.requiresPasswordChange = !query.value(2).toBool();
+  } else if (query.lastError().isValid()) {
+    spdlog::error("[DB] checkAuth error: {}",
+                  query.lastError().text().toStdString());
   }
 
   return result;
@@ -66,13 +116,25 @@ bool DatabaseManager::addUser(const QString &login, const QString &password,
   query.bindValue(":hash", hash);
   query.bindValue(":nick", nickname);
 
-  return query.exec();
+  if (!query.exec()) {
+    spdlog::error("[DB] addUser error: {}",
+                  query.lastError().text().toStdString());
+    return false;
+  }
+
+  return true;
 }
 
 QList<DatabaseManager::UserRecord> DatabaseManager::getUsers() {
   QList<UserRecord> users;
   QSqlQuery query("SELECT id, login, nickname FROM users WHERE deleted_at IS "
                   "NULL ORDER BY id");
+
+  if (!query.exec()) {
+    spdlog::error("[DB] getUsers error: {}",
+                  query.lastError().text().toStdString());
+    return users;
+  }
 
   while (query.next())
     users.append({query.value(0).toInt(), query.value(1).toString(),
@@ -88,7 +150,13 @@ bool DatabaseManager::setNickname(const QString &login,
   query.bindValue(":nick", newNickname);
   query.bindValue(":login", login);
 
-  return query.exec() && query.numRowsAffected() > 0;
+  if (!query.exec()) {
+    spdlog::error("[DB] setNickname error: {}",
+                  query.lastError().text().toStdString());
+    return false;
+  }
+
+  return query.numRowsAffected() > 0;
 }
 
 bool DatabaseManager::setPassword(const QString &login,
@@ -105,7 +173,13 @@ bool DatabaseManager::setPassword(const QString &login,
   query.bindValue(":changed", isChangedByUser);
   query.bindValue(":login", login);
 
-  return query.exec() && query.numRowsAffected() > 0;
+  if (!query.exec()) {
+    spdlog::error("[DB] setPassword error: {}",
+                  query.lastError().text().toStdString());
+    return false;
+  }
+
+  return query.numRowsAffected() > 0;
 }
 
 bool DatabaseManager::deleteUser(const QString &login) {
@@ -114,5 +188,185 @@ bool DatabaseManager::deleteUser(const QString &login) {
                 ":login AND deleted_at IS NULL");
   query.bindValue(":login", login);
 
-  return query.exec() && query.numRowsAffected() > 0;
+  if (!query.exec()) {
+    spdlog::error("[DB] deleteUser error: {}",
+                  query.lastError().text().toStdString());
+    return false;
+  }
+
+  return query.numRowsAffected() > 0;
+}
+
+QJsonObject DatabaseManager::saveMessage(const int roomId, const int senderId,
+                                         const QString &text) {
+  QJsonObject msgObj;
+  QSqlQuery query;
+
+  query.prepare(R"(
+      INSERT INTO messages (room_id, sender_id, text)
+      VALUES (:room_id, :sender_id, :text)
+      RETURNING id, sent_at, metadata
+  )");
+
+  query.bindValue(":room_id", roomId);
+  query.bindValue(":sender_id", senderId);
+  query.bindValue(":text", text);
+
+  if (!query.exec() || !query.next()) {
+    spdlog::error("[DB] Failed to save message: {}",
+                  query.lastError().text().toStdString());
+    return msgObj;
+  }
+
+  msgObj["id"] = query.value("id").toLongLong();
+  msgObj["sent_at"] = query.value("sent_at").toDateTime().toString(Qt::ISODate);
+
+  QByteArray metadataBytes = query.value("metadata").toByteArray();
+  if (!metadataBytes.isEmpty()) {
+    QJsonParseError parseError;
+    QJsonDocument metaDoc = QJsonDocument::fromJson(metadataBytes, &parseError);
+    if (parseError.error == QJsonParseError::NoError && metaDoc.isObject()) {
+      msgObj["metadata"] = metaDoc.object();
+    }
+  }
+
+  return msgObj;
+}
+
+QJsonArray DatabaseManager::getRoomHistory(const int roomId,
+                                           const qint64 beforeId,
+                                           const int limit) {
+  QJsonArray history;
+  QSqlQuery query;
+
+  QString queryString = R"(
+        SELECT m.id, m.text, u.nickname, m.is_pinned, m.sent_at, m.updated_at, m.metadata
+        FROM messages m
+        JOIN users u ON m.sender_id = u.id
+        WHERE m.room_id = :room_id AND m.is_deleted = FALSE
+  )";
+
+  if (beforeId > 0) {
+    queryString += " AND m.id < :before_id";
+  }
+
+  queryString += " ORDER BY m.id DESC LIMIT :limit";
+
+  query.prepare(queryString);
+  query.bindValue(":room_id", roomId);
+  query.bindValue(":limit", limit);
+
+  if (beforeId > 0) {
+    query.bindValue(":before_id", beforeId);
+  }
+
+  if (!query.exec()) {
+    spdlog::error("[DB] Failed to load history: {}",
+                  query.lastError().text().toStdString());
+    return history;
+  }
+
+  QList<QJsonObject> tempMessages;
+  while (query.next()) {
+    QJsonObject msg{
+        {"type", "message"},
+        {"id", query.value("id").toLongLong()},
+        {"text", query.value("text").toString()},
+        {"nick", query.value("nickname").toString()},
+        {"is_pinned", query.value("is_pinned").toBool()},
+        {"sent_at", query.value("sent_at").toDateTime().toString(Qt::ISODate)}};
+
+    QVariant updatedAt = query.value("updated_at");
+    if (!updatedAt.isNull()) {
+      msg["updated_at"] = updatedAt.toDateTime().toString(Qt::ISODate);
+    }
+
+    QByteArray metadataBytes = query.value("metadata").toByteArray();
+    if (!metadataBytes.isEmpty()) {
+      QJsonParseError parseError;
+      QJsonDocument metaDoc =
+          QJsonDocument::fromJson(metadataBytes, &parseError);
+      if (parseError.error == QJsonParseError::NoError && metaDoc.isObject()) {
+        msg["metadata"] = metaDoc.object();
+      }
+    }
+
+    tempMessages.prepend(msg);
+  }
+
+  for (const auto &msg : tempMessages) {
+    history.append(msg);
+  }
+
+  return history;
+}
+
+bool DatabaseManager::setMessagePinned(const qint64 messageId,
+                                       const bool isPinned) {
+  QSqlQuery query;
+  query.prepare("UPDATE messages SET is_pinned = :is_pinned WHERE id = :id AND "
+                "is_deleted = FALSE");
+  query.bindValue(":is_pinned", isPinned);
+  query.bindValue(":id", messageId);
+
+  if (!query.exec()) {
+    spdlog::error("[DB] setMessagePinned error: {}",
+                  query.lastError().text().toStdString());
+    return false;
+  }
+
+  return query.numRowsAffected() > 0;
+}
+
+QJsonArray DatabaseManager::getPinnedMessages(const int roomId) {
+  QJsonArray pinnedArray;
+  QSqlQuery query;
+
+  query.prepare(R"(
+        SELECT m.id, m.text, u.nickname
+        FROM messages m
+        JOIN users u ON m.sender_id = u.id
+        WHERE m.room_id = :room_id AND m.is_pinned = TRUE AND m.is_deleted = FALSE
+        ORDER BY m.sent_at DESC
+    )");
+  query.bindValue(":room_id", roomId);
+
+  if (!query.exec()) {
+    spdlog::error("getPinnedMessages error: {}",
+                  query.lastError().text().toStdString());
+    return pinnedArray;
+  }
+
+  while (query.next()) {
+    const QJsonObject msg{{"type", "pinned_message"},
+                          {"id", query.value("id").toLongLong()},
+                          {"text", query.value("text").toString()},
+                          {"nick", query.value("nickname").toString()}};
+    pinnedArray.append(msg);
+  }
+
+  return pinnedArray;
+}
+
+bool DatabaseManager::updateMessage(const qint64 messageId, const int senderId,
+                                    const QString &newText) {
+  QSqlQuery query;
+
+  query.prepare(R"(
+      UPDATE messages
+      SET text = :text, updated_at = NOW()
+      WHERE id = :id AND sender_id = :sender_id AND is_deleted = FALSE
+  )");
+
+  query.bindValue(":text", newText);
+  query.bindValue(":id", messageId);
+  query.bindValue(":sender_id", senderId);
+
+  if (!query.exec()) {
+    spdlog::error("[DB] Failed to update message: {}",
+                  query.lastError().text().toStdString());
+    return false;
+  }
+
+  return query.numRowsAffected() > 0;
 }

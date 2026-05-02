@@ -5,8 +5,11 @@
 
 #include "../../Common/Command.h"
 #include "ChangePassCommand.h"
+#include "EditCommand.h"
 #include "HelpCommand.h"
+#include "HistoryCommand.h"
 #include "LoginCommand.h"
+#include "PinCommand.h"
 
 class ChatClient;
 class ClientCommandRegistry {
@@ -18,6 +21,11 @@ public:
         std::make_shared<HelpCommand>(m_rootCommand.get()));
     m_rootCommand->addSubCommand(std::make_shared<LoginCommand>(client));
     m_rootCommand->addSubCommand(std::make_shared<ChangePassCommand>(client));
+
+    m_rootCommand->addSubCommand(std::make_shared<EditCommand>(client));
+    m_rootCommand->addSubCommand(std::make_shared<PinCommand>(client, true));
+    m_rootCommand->addSubCommand(std::make_shared<PinCommand>(client, false));
+    m_rootCommand->addSubCommand(std::make_shared<HistoryCommand>(client));
   }
 
   void processInput(const QString &line) const {

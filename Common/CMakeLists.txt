@@ -1,6 +1,7 @@
 add_library(LanChatCommon STATIC
         Command.cpp
         Command.h
+        NetworkUtils.h
 )
 
 include(FetchContent)
