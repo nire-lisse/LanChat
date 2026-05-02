@@ -22,7 +22,8 @@ public:
   ~DatabaseManager() override;
 
   bool connectToDatabase(const QString &host, const QString &dbName,
-                         const QString &user, const QString &pass);
+                         const QString &user, const QString &pass,
+                         const QString &encryptionKey);
 
   AuthResult checkAuth(const QString &login, const QString &hash);
 
@@ -43,5 +44,7 @@ public:
   QJsonArray getPinnedMessages(int roomId);
 
 private:
+  QString m_encryptionKey;
+
   void initTables();
 };

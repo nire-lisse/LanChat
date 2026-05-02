@@ -18,7 +18,10 @@ DatabaseManager::~DatabaseManager() {
 bool DatabaseManager::connectToDatabase(const QString &host,
                                         const QString &dbName,
                                         const QString &user,
-                                        const QString &pass) {
+                                        const QString &pass,
+                                        const QString &encryptionKey) {
+  m_encryptionKey = encryptionKey;
+
   QSqlDatabase db = QSqlDatabase::addDatabase("QPSQL");
   db.setHostName(host);
   db.setDatabaseName(dbName);
@@ -41,6 +44,11 @@ bool DatabaseManager::connectToDatabase(const QString &host,
 void DatabaseManager::initTables() {
   QSqlQuery query;
 
+  if (!query.exec("CREATE EXTENSION IF NOT EXISTS pgcrypto")) {
+    spdlog::error("Failed to enable pgcrypto: {}",
+                  query.lastError().text().toStdString());
+  }
+
   if (!query.exec(R"(
         CREATE TABLE IF NOT EXISTS users (
             id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -61,7 +69,7 @@ void DatabaseManager::initTables() {
             id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             room_id INT NOT NULL,
             sender_id INT NOT NULL,
-            text TEXT,
+            text BYTEA,
             sent_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NULL,
             is_deleted BOOLEAN DEFAULT FALSE,
@@ -204,13 +212,14 @@ QJsonObject DatabaseManager::saveMessage(const int roomId, const int senderId,
 
   query.prepare(R"(
       INSERT INTO messages (room_id, sender_id, text)
-      VALUES (:room_id, :sender_id, :text)
+      VALUES (:room_id, :sender_id, PGP_SYM_ENCRYPT(:text, :enc_key))
       RETURNING id, sent_at, metadata
   )");
 
   query.bindValue(":room_id", roomId);
   query.bindValue(":sender_id", senderId);
   query.bindValue(":text", text);
+  query.bindValue(":enc_key", m_encryptionKey);
 
   if (!query.exec() || !query.next()) {
     spdlog::error("[DB] Failed to save message: {}",
@@ -240,7 +249,7 @@ QJsonArray DatabaseManager::getRoomHistory(const int roomId,
   QSqlQuery query;
 
   QString queryString = R"(
-        SELECT m.id, m.text, u.nickname, m.is_pinned, m.sent_at, m.updated_at, m.metadata
+        SELECT m.id, PGP_SYM_DECRYPT(m.text::bytea, :enc_key) as text, u.nickname, m.is_pinned, m.sent_at, m.updated_at, m.metadata
         FROM messages m
         JOIN users u ON m.sender_id = u.id
         WHERE m.room_id = :room_id AND m.is_deleted = FALSE
@@ -255,6 +264,7 @@ QJsonArray DatabaseManager::getRoomHistory(const int roomId,
   query.prepare(queryString);
   query.bindValue(":room_id", roomId);
   query.bindValue(":limit", limit);
+  query.bindValue(":enc_key", m_encryptionKey);
 
   if (beforeId > 0) {
     query.bindValue(":before_id", beforeId);
@@ -323,13 +333,14 @@ QJsonArray DatabaseManager::getPinnedMessages(const int roomId) {
   QSqlQuery query;
 
   query.prepare(R"(
-        SELECT m.id, m.text, u.nickname
+        SELECT m.id, PGP_SYM_DECRYPT(m.text::bytea, :enc_key) as text, u.nickname
         FROM messages m
         JOIN users u ON m.sender_id = u.id
         WHERE m.room_id = :room_id AND m.is_pinned = TRUE AND m.is_deleted = FALSE
         ORDER BY m.sent_at DESC
     )");
   query.bindValue(":room_id", roomId);
+  query.bindValue(":enc_key", m_encryptionKey);
 
   if (!query.exec()) {
     spdlog::error("getPinnedMessages error: {}",
@@ -354,11 +365,12 @@ bool DatabaseManager::updateMessage(const qint64 messageId, const int senderId,
 
   query.prepare(R"(
       UPDATE messages
-      SET text = :text, updated_at = NOW()
+      SET text = PGP_SYM_ENCRYPT(:text, :enc_key), updated_at = NOW()
       WHERE id = :id AND sender_id = :sender_id AND is_deleted = FALSE
   )");
 
   query.bindValue(":text", newText);
+  query.bindValue(":enc_key", m_encryptionKey);
   query.bindValue(":id", messageId);
   query.bindValue(":sender_id", senderId);
 

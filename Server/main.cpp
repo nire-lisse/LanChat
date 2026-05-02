@@ -52,8 +52,11 @@ int main(int argc, char *argv[]) {
   const QString port = parser.value(portOption);
 
   const QString dbPass = settings.value("Database/Password", "").toString();
-  if (dbPass.isEmpty()) {
-    spdlog::error("Database password is not set in config.ini!");
+  const QString dbKey = settings.value("Database/EncryptionKey", "").toString();
+
+  if (dbPass.isEmpty() || dbKey.isEmpty()) {
+    spdlog::error(
+        "Database password or encryption key is not set in config.ini!");
 
     return 1;
   }
@@ -62,7 +65,8 @@ int main(int argc, char *argv[]) {
   if (!dbManager.connectToDatabase(
           settings.value("Database/Host", "127.0.0.1").toString(),
           settings.value("Database/Name", "lanchat").toString(),
-          settings.value("Database/User", "chatserver").toString(), dbPass)) {
+          settings.value("Database/User", "chatserver").toString(), dbPass,
+          dbKey)) {
     return 1;
   }
 
