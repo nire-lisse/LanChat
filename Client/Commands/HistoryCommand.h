@@ -14,13 +14,11 @@ public:
   void execute(const QStringList &args) override {
     qint64 beforeId = 0;
 
-    if (!args.isEmpty()) {
-      bool ok;
-      beforeId = args[0].toLongLong(&ok);
-      if (!ok) {
-        std::println("[Error] Invalid message ID.");
-        return;
-      }
+    bool ok;
+    beforeId = args[0].toLongLong(&ok);
+    if (!ok) {
+      std::println("[Error] Invalid message ID.");
+      return;
     }
 
     m_client->sendHistoryRequest(beforeId);

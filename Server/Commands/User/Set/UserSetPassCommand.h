@@ -1,5 +1,5 @@
 #pragma once
-#include "../../../DatabaseManager.h"
+#include "../../../Database/DatabaseManager.h"
 #include "Command.h"
 
 class UserSetPassCommand : public Command {
@@ -15,7 +15,7 @@ public:
     const QString login = args[0];
 
     if (const QString newPass = args[1];
-        m_db->setPassword(login, newPass, false))
+        m_db->users().setPassword(login, newPass, false))
       spdlog::info("Password for '{}' has been reset.", login.toStdString());
     else
       spdlog::warn("Could not reset password for '{}'.", login.toStdString());

@@ -15,11 +15,6 @@ public:
         m_client(client), m_isPinning(isPinning) {}
 
   void execute(const QStringList &args) override {
-    if (args.isEmpty()) {
-      std::println("[Error] Usage: /{} <message_id>", m_name.toStdString());
-      return;
-    }
-
     bool ok;
     const qint64 msgId = args[0].toLongLong(&ok);
     if (!ok) {

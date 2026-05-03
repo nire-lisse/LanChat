@@ -24,6 +24,10 @@ public:
   void sendEditMessage(qint64 messageId, const QString &newText) const;
   void sendPinMessage(qint64 messageId, bool isPinned) const;
   void sendHistoryRequest(qint64 beforeId = 0) const;
+  void sendGetRoomsRequest() const;
+  void sendJoinRoomRequest(const QString& target) const;
+  void sendCreateRoomRequest(const QString &name, int type, const QString &description) const;
+  void sendInviteRequest(const QString &targetLogin) const;
 
 private slots:
   void onConnected();
@@ -43,12 +47,17 @@ private:
   std::unique_ptr<ClientCommandRegistry> m_registry;
   bool m_isAuthorized = false;
 
+  int m_currentRoomId = 1;
+  QString m_currentRoomName = "Global";
+
   void handleAuthResponse(const QJsonObject &json);
   void handleIncomingMessage(const QJsonObject &json);
   void handleSystemMessage(const QJsonObject &json);
   void handleHistoryResponse(const QJsonObject &json);
   void handleMessageEdited(const QJsonObject &json);
   void handleMessagePinned(const QJsonObject &json);
+  void handleRoomList(const QJsonObject &json);
+  void handleJoinResponse(const QJsonObject &json);
 
   void printMessage(const QJsonObject &msgJson);
 };

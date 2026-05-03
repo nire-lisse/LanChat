@@ -103,6 +103,10 @@ void ChatClient::onReadyRead() {
         handleMessageEdited(json);
       else if (type == "message_pinned")
         handleMessagePinned(json);
+      else if (type == "room_list")
+        handleRoomList(json);
+      else if (type == "join_response")
+        handleJoinResponse(json);
       else if (type == "error")
         std::println("[Server Error] {}",
                      json["text"].toString().toStdString());
@@ -154,7 +158,8 @@ void ChatClient::sendChangePassword(const QString &newPassword,
 }
 
 void ChatClient::sendChatMessage(const QString &text) const {
-  const QJsonObject message{{"type", "message"}, {"text", text}};
+  const QJsonObject message{
+      {"type", "message"}, {"text", text}};
 
   NetworkUtils::sendJson(m_socket, message);
 }
@@ -183,16 +188,18 @@ void ChatClient::handleSystemMessage(const QJsonObject &json) {
 
 void ChatClient::sendEditMessage(const qint64 messageId,
                                  const QString &newText) const {
-  const QJsonObject msg{
-      {"type", "edit_message"}, {"id", messageId}, {"text", newText}};
+  const QJsonObject msg{{"type", "edit_message"},
+                        {"id", messageId},
+                        {"text", newText}};
 
   NetworkUtils::sendJson(m_socket, msg);
 }
 
 void ChatClient::sendPinMessage(const qint64 messageId,
                                 const bool isPinned) const {
-  const QJsonObject msg{
-      {"type", "pin_message"}, {"id", messageId}, {"is_pinned", isPinned}};
+  const QJsonObject msg{{"type", "pin_message"},
+                        {"id", messageId},
+                        {"is_pinned", isPinned}};
 
   NetworkUtils::sendJson(m_socket, msg);
 }
@@ -262,3 +269,70 @@ void ChatClient::handleMessagePinned(const QJsonObject &json) {
   else
     std::println("[System] Message ID:{} was UNPINNED.", id);
 }
+
+void ChatClient::sendGetRoomsRequest() const {
+  const QJsonObject msg{{"type", "get_rooms"}};
+  NetworkUtils::sendJson(m_socket, msg);
+}
+
+void ChatClient::sendJoinRoomRequest(const QString &target) const {
+  const QJsonObject msg{{"type", "join_room"}, {"target", target}};
+  NetworkUtils::sendJson(m_socket, msg);
+}
+
+void ChatClient::handleRoomList(const QJsonObject &json) {
+  const QJsonArray rooms = json["rooms"].toArray();
+  std::println("\n--- Available Rooms ---");
+  for (const auto &val : rooms) {
+    const QJsonObject r = val.toObject();
+    const QString name = r["name"].toString();
+    const int type = r["type"].toInt();
+    const QString desc = r["description"].toString();
+    const int unread = r["unread"].toInt();
+
+    QString typeStr = (type == 0)   ? "Public"
+                      : (type == 1) ? "Private"
+                                    : "Direct";
+
+    if (type == 2)
+      continue;
+
+    QString unreadStr = unread > 0 ? QString(" (+%1 unread)").arg(unread) : "";
+
+    std::println("[{}] {} - {}{}", typeStr.toStdString(), name.toStdString(),
+                 desc.toStdString(), unreadStr.toStdString());
+  }
+  std::println("-----------------------");
+}
+
+void ChatClient::handleJoinResponse(const QJsonObject &json) {
+  m_currentRoomId = json["room_id"].toInt();
+  m_currentRoomName = json["target"].toString();
+
+  for (int i = 0; i < 50; ++i)
+    std::println("");
+
+  std::println("=== Joined Room: {} ===", m_currentRoomName.toStdString());
+
+  handleHistoryResponse(json);
+}
+
+void ChatClient::sendCreateRoomRequest(const QString &name, int type, const QString &description) const {
+  const QJsonObject msg{
+        {"type", "create_room"},
+        {"name", name},
+        {"room_type", type},
+        {"description", description}
+  };
+
+  NetworkUtils::sendJson(m_socket, msg);
+}
+
+void ChatClient::sendInviteRequest(const QString &targetLogin) const {
+  const QJsonObject msg{
+        {"type", "invite_user"},
+        {"target_login", targetLogin}
+  };
+  NetworkUtils::sendJson(m_socket, msg);
+}
+

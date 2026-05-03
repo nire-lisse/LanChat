@@ -1,5 +1,5 @@
 #pragma once
-#include "../../DatabaseManager.h"
+#include "../../Database/DatabaseManager.h"
 #include "Command.h"
 #include "spdlog/spdlog.h"
 
@@ -11,7 +11,7 @@ public:
       : Command("del", "Delete a user", QStringList{"<login>"}), m_db(db) {}
 
   void execute(const QStringList &args) override {
-    if (const QString login = args[0]; m_db->deleteUser(login))
+    if (const QString login = args[0]; m_db->users().deleteUser(login))
       spdlog::info("User '{}' marked as deleted.", login.toStdString());
     else
       spdlog::warn("Failed to delete user '{}'. Ensure login is "

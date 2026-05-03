@@ -9,6 +9,10 @@ add_executable(LanChatClient
         Commands/EditCommand.h
         Commands/PinCommand.h
         Commands/HistoryCommand.h
+        Commands/RoomsCommand.h
+        Commands/JoinCommand.h
+        Commands/CreateRoomCommand.h
+        Commands/InviteCommand.h
 )
 
 target_link_libraries(LanChatClient

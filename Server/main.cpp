@@ -4,7 +4,7 @@
 #include <QCoreApplication>
 
 #include "ChatServer.h"
-#include "DatabaseManager.h"
+#include "Database/DatabaseManager.h"
 #include "spdlog/sinks/daily_file_sink.h"
 #include "spdlog/sinks/stdout_color_sinks-inl.h"
 #include "spdlog/spdlog.h"

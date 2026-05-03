@@ -1,5 +1,5 @@
 #pragma once
-#include "../../DatabaseManager.h"
+#include "../../Database/DatabaseManager.h"
 #include "Command.h"
 
 #include <print>
@@ -12,7 +12,7 @@ public:
       : Command("list", "List all users"), m_db(db) {}
 
   void execute(const QStringList & /*args*/) override {
-    auto users = m_db->getUsers();
+    auto users = m_db->users().getUsers();
 
     if (users.isEmpty()) {
       std::println("No users found.");

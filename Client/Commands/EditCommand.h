@@ -13,11 +13,6 @@ public:
         m_client(client) {}
 
   void execute(const QStringList &args) override {
-    if (args.size() < 2) {
-      std::println("[Error] Usage: /edit <message_id> <new_text>");
-      return;
-    }
-
     bool ok;
     const qint64 msgId = args[0].toLongLong(&ok);
     if (!ok) {

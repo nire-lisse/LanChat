@@ -2,8 +2,8 @@ add_executable(LanChatServer
         main.cpp
         ChatServer.cpp
         ChatServer.h
-        DatabaseManager.cpp
-        DatabaseManager.h
+        Database/DatabaseManager.cpp
+        Database/DatabaseManager.h
         AdminConsole.cpp
         AdminConsole.h
         Commands/HelpCommand.h
@@ -14,6 +14,13 @@ add_executable(LanChatServer
         Commands/User/UserListCommand.h
         Commands/User/UserSetCommand.h
         Commands/User/Set/UserSetPassCommand.h
+        Database/UserRepository.cpp
+        Database/UserRepository.h
+        Database/MessageRepository.cpp
+        Database/MessageRepository.h
+        Commands/User/Set/UserSetNicknameCommand.h
+        Database/RoomRepository.cpp
+        Database/RoomRepository.h
 )
 
 target_link_libraries(LanChatServer

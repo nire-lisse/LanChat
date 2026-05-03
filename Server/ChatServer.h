@@ -1,6 +1,6 @@
 #pragma once
 
-#include "DatabaseManager.h"
+#include "Database/DatabaseManager.h"
 
 #include <QList>
 #include <QSslServer>
@@ -36,6 +36,10 @@ private:
   void handleHistoryRequest(QSslSocket *senderSocket, const QJsonObject &json) const;
   void handleEditMessageRequest(const QSslSocket *senderSocket,
                                 const QJsonObject &json);
-  void handlePinMessageRequest(QSslSocket *senderSocket,
+  void handlePinMessageRequest(const QSslSocket *senderSocket,
                                const QJsonObject &json);
+  void handleJoinRoomRequest(QSslSocket *senderSocket, const QJsonObject &json);
+  void handleGetRoomsRequest(QSslSocket *senderSocket) const;
+  void handleCreateRoomRequest(QSslSocket *senderSocket, const QJsonObject &json);
+  void handleInviteRequest(QSslSocket *senderSocket, const QJsonObject &json);
 };

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Commands/ServerCommandRegistry.h"
-#include "DatabaseManager.h"
+#include "Database/DatabaseManager.h"
 #include <QObject>
 #include <QSocketNotifier>
 #include <QTextStream>

@@ -9,7 +9,7 @@
 #include <QSslConfiguration>
 #include <QSslKey>
 
-#include "DatabaseManager.h"
+#include "Database/DatabaseManager.h"
 #include "NetworkUtils.h"
 #include "spdlog/spdlog.h"
 
@@ -116,6 +116,14 @@ void ChatServer::onClientReadyRead() {
         handleEditMessageRequest(senderSocket, json);
       else if (type == "pin_message" && isAuthorized)
         handlePinMessageRequest(senderSocket, json);
+      else if (type == "join_room" && isAuthorized)
+        handleJoinRoomRequest(senderSocket, json);
+      else if (type == "get_rooms" && isAuthorized)
+        handleGetRoomsRequest(senderSocket);
+      else if (type == "create_room" && isAuthorized)
+        handleCreateRoomRequest(senderSocket, json);
+      else if (type == "invite_user" && isAuthorized)
+        handleInviteRequest(senderSocket, json);
       else {
         spdlog::error("({}) Invalid packet sequence or unknown type.",
                       senderSocket->peerAddress().toString().toStdString());
@@ -153,7 +161,7 @@ void ChatServer::handleAuthRequest(QSslSocket *senderSocket,
       QCryptographicHash::hash(password.toUtf8(), QCryptographicHash::Sha256)
           .toHex());
 
-  auto authResult = m_dbManager->checkAuth(login, hash);
+  auto authResult = m_dbManager->users().checkAuth(login, hash);
 
   if (!authResult.isValid) {
     spdlog::error("Auth failed for login: {}", login.toStdString());
@@ -177,6 +185,10 @@ void ChatServer::handleAuthRequest(QSslSocket *senderSocket,
     NetworkUtils::sendJson(senderSocket, response);
   } else {
     senderSocket->setProperty("isAuthorized", true);
+    senderSocket->setProperty("current_room_id", 1);
+
+    m_dbManager->rooms().addMemberToRoom(1, authResult.id, RoomRole::Member);
+
     spdlog::info("User '{}' authorized successfully as '{}'",
                  login.toStdString(), authResult.nickname.toStdString());
 
@@ -188,10 +200,14 @@ void ChatServer::handleAuthRequest(QSslSocket *senderSocket,
 
     NetworkUtils::sendJson(senderSocket, successMsg);
 
-    QJsonArray history = m_dbManager->getRoomHistory(1);
-    QJsonArray pinned = m_dbManager->getPinnedMessages(1);
+    handleGetRoomsRequest(senderSocket);
 
-    const QJsonObject historyMsg{{"type", "history_response"},
+    QJsonArray history = m_dbManager->messages().getRoomHistory(1);
+    QJsonArray pinned = m_dbManager->messages().getPinnedMessages(1);
+
+    const QJsonObject historyMsg{{"type", "join_response"},
+                                 {"room_id", 1},
+                                 {"target", "Global"},
                                  {"messages", history},
                                  {"pinned_messages", pinned}};
 
@@ -203,21 +219,25 @@ void ChatServer::handleChatMessage(const QSslSocket *senderSocket,
                                    const QJsonObject &json) {
   const QString nickname = senderSocket->property("nickname").toString();
   const int userId = senderSocket->property("user_id").toInt();
+  const int roomId = senderSocket->property("current_room_id").toInt();
   const QString text = json["text"].toString();
 
-  QJsonObject savedData = m_dbManager->saveMessage(1, userId, text);
+  QJsonObject savedData =
+      m_dbManager->messages().saveMessage(roomId, userId, text);
 
   if (savedData.isEmpty()) {
     spdlog::error("Failed to save message from user ID: {}", userId);
     return;
   }
 
-  QJsonObject outJson{{"type", "message"},
-                      {"id", savedData["id"].toVariant().toLongLong()},
-                      {"nick", nickname},
-                      {"text", text},
-                      {"sent_at", savedData["sent_at"].toString()},
-                      {"is_pinned", false}};
+  const qint64 savedId = savedData["id"].toVariant().toLongLong();
+  m_dbManager->rooms().updateLastReadMessage(userId, roomId, savedId);
+
+  QJsonObject outJson{
+      {"type", "message"}, {"id", savedData["id"].toVariant().toLongLong()},
+      {"nick", nickname},  {"room_id", roomId},
+      {"text", text},      {"sent_at", savedData["sent_at"].toString()},
+      {"is_pinned", false}};
 
   if (savedData.contains("metadata")) {
     outJson["metadata"] = savedData["metadata"];
@@ -225,7 +245,8 @@ void ChatServer::handleChatMessage(const QSslSocket *senderSocket,
 
   for (QSslSocket *socket : m_clients)
     if (socket != senderSocket && socket->property("isAuthorized").toBool())
-      NetworkUtils::sendJson(socket, outJson);
+      if (socket->property("current_room_id").toInt() == roomId)
+        NetworkUtils::sendJson(socket, outJson);
 }
 
 void ChatServer::handleChangePasswordRequest(QSslSocket *senderSocket,
@@ -251,7 +272,7 @@ void ChatServer::handleChangePasswordRequest(QSslSocket *senderSocket,
                                          QCryptographicHash::Sha256)
                     .toHex());
 
-    if (!m_dbManager->checkAuth(login, hash).isValid) {
+    if (!m_dbManager->users().checkAuth(login, hash).isValid) {
       const QJsonObject response{{"type", "error"},
                                  {"text", "Wrong old password"}};
 
@@ -260,7 +281,7 @@ void ChatServer::handleChangePasswordRequest(QSslSocket *senderSocket,
     }
   }
 
-  if (m_dbManager->setPassword(login, newPassword, true)) {
+  if (m_dbManager->users().setPassword(login, newPassword, true)) {
     spdlog::info("User '{}' successfully updated their password.",
                  login.toStdString());
 
@@ -293,9 +314,9 @@ void ChatServer::handleChangePasswordRequest(QSslSocket *senderSocket,
 void ChatServer::handleHistoryRequest(QSslSocket *senderSocket,
                                       const QJsonObject &json) const {
   const qint64 beforeId = json["before_id"].toVariant().toLongLong();
-  const int roomId = json.contains("room_id") ? json["room_id"].toInt() : 1;
+  const int roomId = senderSocket->property("current_room_id").toInt();
 
-  QJsonArray history = m_dbManager->getRoomHistory(roomId, beforeId);
+  QJsonArray history = m_dbManager->messages().getRoomHistory(roomId, beforeId);
 
   const QJsonObject historyMsg{{"type", "history_response"},
                                {"messages", history}};
@@ -308,28 +329,163 @@ void ChatServer::handleEditMessageRequest(const QSslSocket *senderSocket,
   const int userId = senderSocket->property("user_id").toInt();
   const qint64 messageId = json["id"].toVariant().toLongLong();
   const QString newText = json["text"].toString();
+  const int roomId = senderSocket->property("current_room_id").toInt();
 
-  if (m_dbManager->updateMessage(messageId, userId, newText)) {
+  if (m_dbManager->messages().updateMessage(messageId, userId, newText)) {
     const QJsonObject outJson{
         {"type", "message_edited"}, {"id", messageId}, {"text", newText}};
 
     for (QSslSocket *socket : m_clients)
       if (socket->property("isAuthorized").toBool())
-        NetworkUtils::sendJson(socket, outJson);
+        if (socket->property("current_room_id").toInt() == roomId)
+          NetworkUtils::sendJson(socket, outJson);
   }
 }
 
-void ChatServer::handlePinMessageRequest(QSslSocket *senderSocket,
+void ChatServer::handlePinMessageRequest(const QSslSocket *senderSocket,
                                          const QJsonObject &json) {
   const qint64 messageId = json["id"].toVariant().toLongLong();
   const bool isPinned = json["is_pinned"].toBool();
+  const int roomId = senderSocket->property("current_room_id").toInt();
 
-  if (m_dbManager->setMessagePinned(messageId, isPinned)) {
+  if (m_dbManager->messages().setMessagePinned(messageId, isPinned)) {
     const QJsonObject outJson{
         {"type", "message_pinned"}, {"id", messageId}, {"is_pinned", isPinned}};
 
     for (QSslSocket *socket : m_clients)
       if (socket->property("isAuthorized").toBool())
-        NetworkUtils::sendJson(socket, outJson);
+        if (socket->property("current_room_id").toInt() == roomId)
+          NetworkUtils::sendJson(socket, outJson);
+  }
+}
+
+void ChatServer::handleGetRoomsRequest(QSslSocket *senderSocket) const {
+  const int userId = senderSocket->property("user_id").toInt();
+  QList<RoomRecord> rooms = m_dbManager->rooms().getUserRooms(userId);
+
+  QJsonArray roomsArray;
+  for (const auto &r : rooms) {
+    roomsArray.append(QJsonObject{{"id", r.id},
+                                  {"name", r.name},
+                                  {"type", static_cast<int>(r.type)},
+                                  {"description", r.description},
+                                  {"unread", r.unreadCount}});
+  }
+
+  const QJsonObject msg{{"type", "room_list"}, {"rooms", roomsArray}};
+  NetworkUtils::sendJson(senderSocket, msg);
+}
+
+void ChatServer::handleJoinRoomRequest(QSslSocket *senderSocket,
+                                       const QJsonObject &json) {
+  const int userId = senderSocket->property("user_id").toInt();
+  const QString target = json["target"].toString();
+  int targetRoomId = -1;
+
+  if (target.startsWith("@")) {
+    const QString login = target.mid(1);
+    const int targetUserId = m_dbManager->users().getIdByLogin(login);
+
+    if (targetUserId == -1) {
+      NetworkUtils::sendJson(senderSocket,
+                             {{"type", "error"}, {"text", "User not found."}});
+      return;
+    }
+    targetRoomId =
+        m_dbManager->rooms().getOrCreateDirectRoom(userId, targetUserId);
+  } else {
+    targetRoomId = m_dbManager->rooms().getRoomIdByName(target);
+
+    if (targetRoomId == -1) {
+      NetworkUtils::sendJson(senderSocket,
+                             {{"type", "error"}, {"text", "Room not found."}});
+      return;
+    }
+
+    if (!m_dbManager->rooms().hasAccessToRoom(userId, targetRoomId)) {
+      NetworkUtils::sendJson(senderSocket,
+                             {{"type", "error"}, {"text", "Access denied."}});
+      return;
+    }
+  }
+
+  if (targetRoomId != -1) {
+    m_dbManager->rooms().addMemberToRoom(targetRoomId, userId, RoomRole::Member);
+    senderSocket->setProperty("current_room_id", targetRoomId);
+
+    QJsonArray history = m_dbManager->messages().getRoomHistory(targetRoomId);
+    QJsonArray pinned = m_dbManager->messages().getPinnedMessages(targetRoomId);
+
+    if (!history.isEmpty()) {
+      const qint64 lastMsgId = history.last().toObject()["id"].toVariant().toLongLong();
+      m_dbManager->rooms().updateLastReadMessage(userId, targetRoomId, lastMsgId);
+    }
+
+    const QJsonObject response{{"type", "join_response"},
+                               {"room_id", targetRoomId},
+                               {"target", target},
+                               {"messages", history},
+                               {"pinned_messages", pinned}};
+    NetworkUtils::sendJson(senderSocket, response);
+  }
+}
+
+void ChatServer::handleCreateRoomRequest(QSslSocket *senderSocket,
+                                         const QJsonObject &json) {
+  const int userId = senderSocket->property("user_id").toInt();
+  const QString name = json["name"].toString();
+  const int type = json["room_type"].toInt();
+  const QString description = json["description"].toString();
+
+  const int newRoomId = m_dbManager->rooms().createRoom(
+      name, static_cast<RoomType>(type), description, userId);
+
+  if (newRoomId != -1) {
+    NetworkUtils::sendJson(
+        senderSocket, {{"type", "system_message"},
+                       {"text", "Room '" + name + "' created successfully!"}});
+
+    const QJsonObject joinJson{{"target", name}};
+    handleJoinRoomRequest(senderSocket, joinJson);
+  } else {
+    NetworkUtils::sendJson(
+        senderSocket,
+        {{"type", "error"},
+         {"text", "Failed to create room. Name might be taken."}});
+  }
+}
+
+void ChatServer::handleInviteRequest(QSslSocket *senderSocket,
+                                     const QJsonObject &json) {
+  const int userId = senderSocket->property("user_id").toInt();
+  const int roomId = senderSocket->property("current_room_id").toInt();
+  const QString targetLogin = json["target_login"].toString();
+
+  if (!m_dbManager->rooms().hasAccessToRoom(userId, roomId)) {
+    NetworkUtils::sendJson(
+        senderSocket,
+        {{"type", "error"}, {"text", "You don't have access to this room."}});
+    return;
+  }
+
+  const int targetUserId = m_dbManager->users().getIdByLogin(targetLogin);
+  if (targetUserId == -1) {
+    NetworkUtils::sendJson(
+        senderSocket,
+        {{"type", "error"}, {"text", "User '" + targetLogin + "' not found."}});
+    return;
+  }
+
+  if (m_dbManager->rooms().addMemberToRoom(roomId, targetUserId,
+                                           RoomRole::Member)) {
+    NetworkUtils::sendJson(
+        senderSocket, {{"type", "system_message"},
+                       {"text", "User '" + targetLogin +
+                                    "' was successfully added to the room!"}});
+  } else {
+    NetworkUtils::sendJson(
+        senderSocket,
+        {{"type", "error"},
+         {"text", "Failed to add user. Maybe they are already in this room?"}});
   }
 }
