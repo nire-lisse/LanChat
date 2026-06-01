@@ -75,7 +75,7 @@ cmake --build .
 ### 4. Налаштування SSL сертифікатів
 Для роботи сервера необхідні сертифікати шифрування. Згенеруйте самопідписаний сертифікат у папці, з якої будете запускати сервер (наприклад, у теці `build/Server/`):
 ```bash
-openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes
+openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes
 ```
 
 ### 5. Конфігурація Сервера (`config.ini`)
